@@ -1,0 +1,40 @@
+{
+	"name": "@blueocean223/pi-btw",
+	"version": "1.0.0",
+	"description": "/btw for pi: ask a side question against the main conversation's context without interrupting the running task",
+	"license": "MIT",
+	"author": "BlueOcean223",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/BlueOcean223/pi-btw.git"
+	},
+	"homepage": "https://github.com/BlueOcean223/pi-btw#readme",
+	"bugs": {
+		"url": "https://github.com/BlueOcean223/pi-btw/issues"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"test": "bun test ./*.test.ts",
+		"typecheck": "bun x tsc --noEmit"
+	},
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"files": ["index.ts", "history.ts", "panel.ts", "prompt.ts", "request.ts", "snapshot.ts", "README.zh-CN.md"],
+	"keywords": ["pi-package", "pi", "pi-coding-agent", "side-question", "btw", "tui"],
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.0"
+	}
+}
