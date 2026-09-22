@@ -13,6 +13,7 @@ import type { Exchange } from "./history.js";
 import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER } from "./prompt.js";
 import {
 	appendSideTurns,
+	endsWithSystemMessage,
 	extractResult,
 	historyTurns,
 	isMessagesBody,
@@ -156,6 +157,32 @@ describe("isMessagesBody", () => {
 	test("rejects non-objects", () => {
 		expect(isMessagesBody(undefined)).toBe(false);
 		expect(isMessagesBody("{}")).toBe(false);
+	});
+});
+
+describe("endsWithSystemMessage", () => {
+	/**
+	 * Pi's Claude models that accept mid-conversation system messages let the
+	 * adapter flush a prompt-section update at the end of the body. Appending a
+	 * user turn after one is a shape the adapter itself never emits, so such a
+	 * snapshot is not reused.
+	 */
+	test("spots the flushed prompt update at the end of a body", () => {
+		const body = {
+			system: "base",
+			messages: [
+				{ role: "user", content: [{ type: "text", text: "fix the parser" }] },
+				{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+				{ role: "user", content: [{ type: "text", text: "now the lexer" }] },
+				{ role: "system", content: [{ type: "text", text: 'Updated system prompt section "preamble"' }] },
+			],
+		};
+		expect(endsWithSystemMessage(body)).toBe(true);
+	});
+
+	test("leaves an ordinary body alone", () => {
+		expect(endsWithSystemMessage({ system: "base", messages: [{ role: "user", content: "hi" }] })).toBe(false);
+		expect(endsWithSystemMessage({ system: "base", messages: [] })).toBe(false);
 	});
 });
 

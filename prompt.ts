@@ -3,9 +3,9 @@
  * question, and the four sentences used when an answer is shown once and then
  * replayed into the next request.
  *
- * Every string here is English, matching Claude Code 2.1.278 verbatim where it
- * has an equivalent. The model reads these; the panel chrome, which only the
- * user reads, is Chinese and lives in panel.ts.
+ * These strings are read by the model, not the user, so they are English and
+ * fixed rather than prose to polish. The panel chrome the user reads is
+ * Chinese and lives in panel.ts.
  */
 
 /**

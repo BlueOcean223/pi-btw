@@ -3,13 +3,12 @@
  *
  * Nothing here is written to the session file. `pi.appendEntry` would push the
  * exchanges into the session tree, and then a transcript of the main task would
- * carry questions the main task never saw. Claude Code keeps the same list on
- * the session object in memory and loses it on exit; so does this.
+ * carry questions the main task never saw.
  *
- * Everything is keyed by session id. A session switch does not clear the map —
- * switching back inside the same process finds the list intact — but an answer
- * that lands after the switch is dropped rather than filed under whichever
- * session happens to be current.
+ * Everything is keyed by session id, and every write names the session that
+ * asked rather than the one that is open. A session switch therefore neither
+ * clears the map nor misfiles an answer that arrives after it: switching back
+ * inside one process finds the list intact.
  */
 
 import type { SideResult } from "./request.js";
@@ -39,9 +38,18 @@ export function appendExchange(sessionId: string, exchange: Exchange): void {
 	histories.set(sessionId, list.slice(-MAX_HISTORY));
 }
 
-/** The `x` key: drop the replay list. The answer on screen is not stored here. */
-export function clearHistory(sessionId: string): void {
-	histories.delete(sessionId);
+/**
+ * The `x` key: drop the replay list, keeping at most the one exchange the
+ * panel is showing.
+ *
+ * Keeping it matters beyond the redraw. The panel goes on displaying that
+ * answer either way, so dropping it from storage as well would make the panel
+ * disagree with itself: close it, reopen with an empty `/btw`, and the answer
+ * still on screen a second ago is gone.
+ */
+export function clearHistory(sessionId: string, keep?: Exchange): void {
+	if (keep) histories.set(sessionId, [keep]);
+	else histories.delete(sessionId);
 }
 
 /** Test seam. Not called by the extension. */

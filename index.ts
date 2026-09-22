@@ -40,21 +40,22 @@ const USAGE = "用法：/btw <问题>";
 const TUI_ONLY = "/btw 只在交互界面可用，这次没有发出请求";
 
 /**
- * The session the user is looking at right now.
+ * Say something in a mode that has no extension UI.
  *
- * Tracked here rather than read back off a captured context because an answer
- * can land after a session switch, and by then the context that started it
- * belongs to a runtime pi has already replaced. Module state survives that
- * replacement, which is also what lets a session keep its exchanges when the
- * user switches away and back inside one process.
+ * `print` and `json` bind an extension mode but no UI context, so the runner
+ * falls back to a no-op `notify`. Relying on it there makes `/btw` do nothing
+ * at all and say nothing about it. stderr leaves the mode's own stdout
+ * contract — the answer text, or the event stream — untouched.
  */
-let activeSessionId: string | undefined;
+function announce(ctx: ExtensionCommandContext, message: string): void {
+	if (ctx.hasUI) {
+		ctx.ui.notify(message, "warning");
+		return;
+	}
+	process.stderr.write(`${message}\n`);
+}
 
 export default function btw(pi: ExtensionAPI) {
-	pi.on("session_start", (_event, ctx) => {
-		activeSessionId = ctx.sessionManager.getSessionId();
-	});
-
 	pi.on("before_provider_request", (event, ctx) => {
 		const model = ctx.model;
 		if (!model) return;
@@ -79,10 +80,9 @@ export default function btw(pi: ExtensionAPI) {
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const question = args.trim();
 			if (ctx.mode !== "tui") {
-				ctx.ui.notify(TUI_ONLY, "warning");
+				announce(ctx, TUI_ONLY);
 				return;
 			}
-			activeSessionId = ctx.sessionManager.getSessionId();
 			if (!question) {
 				await reopen(ctx);
 				return;
@@ -161,10 +161,11 @@ function start(pi: ExtensionAPI, ctx: ExtensionCommandContext, sessionId: string
 		}
 
 		request.result = result;
-		// An answer that lands after the user moved to another session belongs to
-		// neither: filing it under the current one would put a question that was
-		// never asked there into that session's replay list.
-		if (shouldRemember(result) && activeSessionId === sessionId) {
+		// Filed under the session that asked, not the one that happens to be
+		// open when the answer lands — the two differ whenever the panel was
+		// collapsed and the user switched sessions while the request ran, and
+		// the answer belongs to the session whose context produced it.
+		if (shouldRemember(result)) {
 			appendExchange(sessionId, {
 				question,
 				response: result.response,
@@ -218,7 +219,8 @@ function liveItem(request: Inflight): PanelItem {
 }
 
 async function showPanel(ctx: ExtensionCommandContext, sessionId: string, request: Inflight | undefined): Promise<void> {
-	const items = getHistory(sessionId).map(storedItem);
+	const stored = getHistory(sessionId);
+	const items = stored.map(storedItem);
 	if (request) items.push(liveItem(request));
 	if (items.length === 0) {
 		ctx.ui.notify(USAGE, "info");
@@ -234,7 +236,10 @@ async function showPanel(ctx: ExtensionCommandContext, sessionId: string, reques
 						return () => request.listeners.delete(onChange);
 					}
 				: undefined,
-			clearHistory: () => clearHistory(sessionId),
+			// The kept index maps back onto `stored` because the panel was handed
+			// those exchanges in order. Past the end it is the open request, which
+			// has nothing stored yet and files itself when it lands.
+			clearHistory: (keptIndex) => clearHistory(sessionId, stored[keptIndex]),
 			copy: (text) => {
 				void copyToClipboard(text).catch(() => ctx.ui.notify("复制失败", "error"));
 			},

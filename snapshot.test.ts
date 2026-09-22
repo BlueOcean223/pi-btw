@@ -35,8 +35,15 @@ describe("isCacheWarmProbe", () => {
 		expect(isCacheWarmProbe({ generationConfig: { maxOutputTokens: 1 } })).toBe(true);
 	});
 
+	/** OpenAI Responses rejects a cap under 16 and clamps the probe up to it. */
+	test("recognises a probe an adapter raised to its own floor", () => {
+		expect(isCacheWarmProbe({ max_output_tokens: 16 })).toBe(true);
+	});
+
 	test("leaves a real request alone", () => {
 		expect(isCacheWarmProbe({ max_tokens: 32000 })).toBe(false);
+		expect(isCacheWarmProbe({ max_tokens: 17 })).toBe(false);
+		expect(isCacheWarmProbe({ max_tokens: 0 })).toBe(false);
 		expect(isCacheWarmProbe({})).toBe(false);
 		expect(isCacheWarmProbe(undefined)).toBe(false);
 	});

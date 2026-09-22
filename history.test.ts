@@ -1,9 +1,8 @@
 /**
  * The in-memory exchange list: the cap, the clear, and the per-session split.
  *
- * The split is the one with teeth. Claude Code shipped a bug where one
- * session's side questions showed up in another's; here the only thing keeping
- * them apart is that every read and write is keyed by session id.
+ * The split is the one with teeth. Nothing but the session-id key keeps one
+ * session's side questions out of another's panel.
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -50,6 +49,15 @@ describe("exchange list", () => {
 		clearHistory("s1");
 		expect(getHistory("s1")).toEqual([]);
 		expect(getHistory("s2").map((e) => e.question)).toEqual(["theirs"]);
+	});
+
+	test("clear keeps the one exchange the panel is still showing", () => {
+		const kept = exchange("still on screen");
+		appendExchange("s1", exchange("older"));
+		appendExchange("s1", kept);
+		appendExchange("s1", exchange("newer"));
+		clearHistory("s1", kept);
+		expect(getHistory("s1").map((e) => e.question)).toEqual(["still on screen"]);
 	});
 
 	test("reads return a copy, so a caller cannot edit the stored list", () => {

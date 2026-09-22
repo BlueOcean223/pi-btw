@@ -48,23 +48,35 @@ function isOwnPayload(payload: unknown): boolean {
 }
 
 /**
+ * The largest output cap that can only be a warm-up.
+ *
+ * The cache warmer asks for one token. Adapters are free to raise that to
+ * their own floor — OpenAI Responses rejects anything under 16 and clamps —
+ * so matching on exactly 1 would let those through. No real turn caps its
+ * output this low, so the range is safe to claim.
+ */
+const PROBE_OUTPUT_CAP = 16;
+
+/**
  * Whether a body is pi's cache-warming probe rather than a real turn.
  *
- * The cache warmer re-sends the current prefix with the output capped at one
- * token, and it inherits the main loop's `onPayload`, so it reaches this hook
- * looking exactly like a main request. Its bytes are a fine prefix, but its
- * output cap is not: inheriting it would answer every side question with one
- * token. Skip it and keep the previous snapshot, which has the same prefix.
+ * The warmer re-sends the current prefix with the output capped, and it
+ * inherits the main loop's `onPayload`, so it reaches this hook looking
+ * exactly like a main request. Its bytes are a fine prefix, but its output cap
+ * is not: inheriting it would answer every side question in a token or two.
+ * Skip it and keep the previous snapshot, which has the same prefix.
  */
 export function isCacheWarmProbe(payload: unknown): boolean {
 	if (!payload || typeof payload !== "object") return false;
 	const body = payload as Record<string, unknown>;
+	const capped = (value: unknown) => typeof value === "number" && value > 0 && value <= PROBE_OUTPUT_CAP;
+
 	for (const field of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
-		if (body[field] === 1) return true;
+		if (capped(body[field])) return true;
 	}
 	const generation = body.generationConfig;
 	if (generation && typeof generation === "object") {
-		if ((generation as Record<string, unknown>).maxOutputTokens === 1) return true;
+		if (capped((generation as Record<string, unknown>).maxOutputTokens)) return true;
 	}
 	return false;
 }

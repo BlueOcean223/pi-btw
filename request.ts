@@ -156,6 +156,29 @@ export function isMessagesBody(payload: unknown): payload is MessagesBody {
 }
 
 /**
+ * Whether a captured body ends on a mid-conversation system message.
+ *
+ * Four of Pi's Claude models declare `supportsMidConvoSystemMessages`, and on
+ * those the adapter holds a prompt-section update back until the next
+ * assistant message — or, when none follows, flushes it at the very end. The
+ * body then closes with a system message carrying the update, with the cache
+ * breakpoint on it.
+ *
+ * Appending a user message there is a shape the adapter itself never emits: it
+ * takes care to place a system message before an assistant turn or last, never
+ * directly before a user turn. Rather than fabricate an assistant turn to make
+ * room, such a body is left alone and the question goes through the rebuild
+ * path, which lands the appended messages ahead of that flush and comes out
+ * legal. The cost is one uncached side question, until the main loop's next
+ * request replaces the snapshot.
+ */
+export function endsWithSystemMessage(body: MessagesBody): boolean {
+	const last = body.messages[body.messages.length - 1];
+	if (!last || typeof last !== "object") return false;
+	return (last as { role?: unknown }).role === "system";
+}
+
+/**
  * Append the replayed exchanges and the wrapped question to a captured body.
  *
  * Nothing else is touched: not `model`, `system`, `tools`, `thinking`,
@@ -163,10 +186,10 @@ export function isMessagesBody(payload: unknown): payload is MessagesBody {
  * would change the prefix on some models and cost the whole cache.
  *
  * The appended messages carry no `cache_control`, and the breakpoint already
- * sitting on the shared prefix is left where it is. That is this codebase's
- * version of Claude Code's `skipCacheWrite`: the read still hits, and a
- * one-shot suffix nobody will ever continue from does not become a cache entry
- * of its own.
+ * sitting on the shared prefix is left where it is. Moving it onto the
+ * question would buy nothing and cost a cache write: the read still hits from
+ * the prefix, and a one-shot suffix nobody will ever continue from has no
+ * business becoming a cache entry of its own.
  */
 export function appendSideTurns(body: MessagesBody, turns: readonly ReplayTurn[], question: string): MessagesBody {
 	const messages = [...body.messages];
@@ -303,7 +326,8 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 
 		let context: Context;
 		let payload: unknown;
-		if (snapshot && isMessagesBody(snapshot.payload)) {
+		const reusable = snapshot && isMessagesBody(snapshot.payload) && !endsWithSystemMessage(snapshot.payload);
+		if (reusable) {
 			payload = appendSideTurns(structuredClone(snapshot.payload) as MessagesBody, turns, question);
 			markOwnPayload(payload);
 			context = placeholderContext(question);

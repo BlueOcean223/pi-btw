@@ -23,6 +23,7 @@ import {
 	type KeybindingsManager,
 	Markdown,
 	matchesKey,
+	parseKey,
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
@@ -56,8 +57,11 @@ export interface PanelDeps {
 	items: PanelItem[];
 	/** Redraw hook for a live request. Returns an unsubscribe function. */
 	subscribe?(onChange: () => void): () => void;
-	/** The `x` key. Drops the stored exchanges; the open item stays on screen. */
-	clearHistory(): void;
+	/**
+	 * The `x` key. Drops every stored exchange except the one being viewed,
+	 * identified by its index into `items` as the panel was handed them.
+	 */
+	clearHistory(keptIndex: number): void;
 	copy(text: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 }
@@ -68,15 +72,28 @@ export function bodyHeight(terminalRows: number): number {
 }
 
 /**
- * The earlier questions to list, and how many are hidden behind them.
+ * Which earlier questions to list, and how many are hidden in front of them.
  *
- * `count` is every item except the one at the end. Past the window the rest
- * collapse into a single line, so a session holding twenty exchanges still
- * opens a panel that fits on screen.
+ * `count` is every item except the one at the end. Only `window` of them fit,
+ * so the rest collapse into a single line and a session holding twenty
+ * exchanges still opens a panel that fits on screen.
+ *
+ * The window slides to keep `cursor` inside it. Without that, paging back past
+ * the fifth question moves the selection onto a row the panel does not draw:
+ * the answer area changes but nothing is marked, and the reader cannot tell
+ * which question they are looking at.
  */
-export function historyWindow(count: number, window: number = HISTORY_WINDOW): { shown: number; hidden: number } {
-	const shown = Math.min(Math.max(0, count), window);
-	return { shown, hidden: Math.max(0, count) - shown };
+export function historyWindow(
+	count: number,
+	cursor: number,
+	window: number = HISTORY_WINDOW,
+): { start: number; shown: number; hidden: number } {
+	const total = Math.max(0, count);
+	const shown = Math.min(total, window);
+	// Default to the most recent; pull back when the cursor sits before them.
+	let start = total - shown;
+	if (cursor >= 0 && cursor < start) start = cursor;
+	return { start, shown, hidden: start };
 }
 
 export function createPanel(deps: PanelDeps) {
@@ -109,6 +126,18 @@ export function createPanel(deps: PanelDeps) {
 		const isDown = bound("tui.select.down", "down");
 		const isConfirm = bound("tui.select.confirm", "enter");
 		const isSubmit = bound("tui.input.submit", "enter");
+
+		/**
+		 * The character a keypress stands for.
+		 *
+		 * A plain letter is not always the letter. Under the Kitty keyboard
+		 * protocol `c` arrives as `ESC [ 99 u`, and under xterm's
+		 * modifyOtherKeys as `ESC [ 27;1;99 ~`; Pi turns one of the two on
+		 * whenever the terminal negotiates it. Comparing the raw bytes would
+		 * leave the letter keys dead in exactly those terminals, with the hint
+		 * row still advertising them.
+		 */
+		const letter = (data: string): string => parseKey(data) ?? data;
 
 		function refresh() {
 			cachedLines = undefined;
@@ -171,14 +200,13 @@ export function createPanel(deps: PanelDeps) {
 
 			const lines: string[] = [];
 			const earlier = items.slice(0, Math.max(0, items.length - 1));
-			const { shown, hidden } = historyWindow(earlier.length);
+			const { start, shown, hidden } = historyWindow(earlier.length, cursor);
 			if (hidden > 0) lines.push(theme.fg("dim", `(+${hidden} earlier /btw)`));
 
-			const firstListed = earlier.length - shown;
-			earlier.slice(firstListed).forEach((item, offset) => {
+			earlier.slice(start, start + shown).forEach((item, offset) => {
 				const label = truncateToWidth(item.question.replace(/\s+/g, " "), Math.max(4, width - 2));
 				const row = `· ${label}`;
-				lines.push(firstListed + offset === cursor ? theme.bold(row) : theme.fg("muted", row));
+				lines.push(start + offset === cursor ? theme.bold(row) : theme.fg("muted", row));
 			});
 
 			const live = items[items.length - 1];
@@ -234,9 +262,11 @@ export function createPanel(deps: PanelDeps) {
 				}
 				if (isUp(data)) return scrollBy(-1);
 				if (isDown(data)) return scrollBy(1);
-				if (data === "[" || matchesKey(data, Key.shift("left"))) return move(-1);
-				if (data === "]" || matchesKey(data, Key.shift("right"))) return move(1);
-				if (data === "c") {
+
+				const key = letter(data);
+				if (key === "[" || matchesKey(data, Key.shift("left"))) return move(-1);
+				if (key === "]" || matchesKey(data, Key.shift("right"))) return move(1);
+				if (key === "c") {
 					const text = current()?.text() ?? "";
 					if (text) {
 						deps.copy(text);
@@ -244,13 +274,17 @@ export function createPanel(deps: PanelDeps) {
 					}
 					return;
 				}
-				if (data === "x") {
-					deps.clearHistory();
-					// Keep the item the panel is showing; drop the column above it.
-					const live = items[items.length - 1];
+				if (key === "x") {
+					// Keep the item being viewed, not whichever one happens to be
+					// last: paging back and pressing `x` should clear the column,
+					// not swap the answer under the reader.
+					const kept = items[cursor];
+					deps.clearHistory(cursor);
 					items.length = 0;
-					if (live) items.push(live);
+					if (kept) items.push(kept);
 					cursor = Math.max(0, items.length - 1);
+					scroll = 0;
+					stickToEnd = true;
 					refresh();
 				}
 			},

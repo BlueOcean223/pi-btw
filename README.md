@@ -61,6 +61,9 @@ pi --extension ./index.ts
 - **A side question sees the main loop's last outbound request**, not the response to it. A tool result recorded since then shows up in the next side question, after the main loop sends again.
 - **While the panel is up it owns the keyboard**, so the main task's interrupt key is not reachable. Close the panel first.
 - **The exchange list lives for as long as the process does.** Switching sessions and back keeps it; quitting or `/reload` drops it, and an empty `/btw` is back to the usage line.
+- **Not every request makes a reusable prefix.** On the Claude models that accept mid-conversation
+  system messages, a body ending on a prompt-section update is left alone and the question is rebuilt
+  instead, which misses the cache until the main loop sends again.
 - **`PI_BTW_DEBUG=1`** prints `cacheRead`/`cacheWrite` after each answer. A warm second question reads most of the context and writes almost nothing; a zero read next to a large write means the prefix diverged from the main request's.
 
 ## Not in this version
