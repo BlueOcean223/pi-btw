@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Exchange } from "./history.js";
 import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER } from "./prompt.js";
 import {
@@ -18,6 +19,7 @@ import {
 	historyTurns,
 	isMessagesBody,
 	type MessagesBody,
+	sessionTranscript,
 	shouldRemember,
 	trimTrailingIncompleteTurn,
 } from "./request.js";
@@ -309,5 +311,52 @@ describe("trimTrailingIncompleteTurn", () => {
 
 	test("an empty conversation trims to nothing without throwing", () => {
 		expect(trimTrailingIncompleteTurn([])).toEqual([]);
+	});
+});
+
+describe("sessionTranscript", () => {
+	const user = (t: string): Message => ({ role: "user", content: [text(t)], timestamp: 0 });
+
+	test("a message omitted by a context edit stays out, as it does for the main loop", () => {
+		// Length recovery omits the truncated reply. Unlike an errored attempt,
+		// no adapter filters a `length` reply on its own, so the edit is all that
+		// keeps it out of the request.
+		const session = SessionManager.inMemory("/tmp");
+		session.appendMessage(user("summarize the repo"));
+		const truncated = session.appendMessage(answer({ content: [text("The repo has thr")], stopReason: "length" }));
+		session.appendContextEdit(truncated, null);
+
+		expect(sessionTranscript(session)).toEqual([user("summarize the repo")]);
+	});
+
+	test("a message replaced by a context edit goes out with the replacement", () => {
+		const session = SessionManager.inMemory("/tmp");
+		session.appendMessage(user("read it"));
+		session.appendMessage(
+			answer({ content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], stopReason: "toolUse" }),
+		);
+		const result = session.appendMessage({
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "read",
+			content: [text("FULL FILE CONTENTS")],
+			isError: false,
+			timestamp: 0,
+		});
+		session.appendMessage(answer({ content: [text("done")] }));
+		session.appendContextEdit(result, { content: "[pruned]" });
+
+		const transcript = sessionTranscript(session);
+		expect(transcript.find((m) => m.role === "toolResult")?.content).toEqual([text("[pruned]")]);
+		expect(JSON.stringify(transcript)).not.toContain("FULL FILE CONTENTS");
+	});
+
+	test("a pi without the projection still gets its transcript from the entries", () => {
+		const session = SessionManager.inMemory("/tmp");
+		session.appendMessage(user("hi"));
+		session.appendMessage(answer({ content: [text("hello")] }));
+		const older = { buildContextEntries: () => session.buildContextEntries() } as unknown as SessionManager;
+
+		expect(sessionTranscript(older)).toEqual(sessionTranscript(session));
 	});
 });

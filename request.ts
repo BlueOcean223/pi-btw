@@ -259,11 +259,28 @@ function replayMessages(turns: readonly ReplayTurn[], question: string, model: M
 }
 
 /**
- * Rebuild the request from the session transcript.
+ * The session transcript as the main loop would send it now.
  *
- * `buildContextEntries()` already resolves compaction and branch summaries, so
- * this is what the model is supposed to see — there is no compaction boundary
- * left to cut at.
+ * This reads pi's own projection instead of converting the context entries one
+ * by one. A `context_edit` entry omits or replaces an earlier message in model
+ * context while its raw text stays in the session: length recovery writes them,
+ * and so can extensions at a turn boundary. Converted entry by entry, the edit
+ * contributes nothing and the original message goes out as it was. The
+ * projection applies the edits and also resolves compaction and branch
+ * summaries, so there is no compaction boundary left to cut at.
+ *
+ * The peer range is open, and a pi without the projection also has no context
+ * edits, so there the entries are still converted directly.
+ */
+export function sessionTranscript(sessionManager: ExtensionCommandContext["sessionManager"]): Message[] {
+	const messages =
+		sessionManager.buildSessionProjection?.().messages ??
+		sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages);
+	return trimTrailingIncompleteTurn(convertToLlm(messages));
+}
+
+/**
+ * Rebuild the request from the session transcript.
  *
  * pi records the system prompt and the tool declarations as system messages in
  * the transcript, so when the transcript has them the context is handed over
@@ -279,8 +296,7 @@ function rebuildContext(
 	question: string,
 	model: Model<any>,
 ): Context {
-	const entries = ctx.sessionManager.buildContextEntries();
-	const transcript = trimTrailingIncompleteTurn(convertToLlm(entries.flatMap(sessionEntryToContextMessages)));
+	const transcript = sessionTranscript(ctx.sessionManager);
 	const messages = [...transcript, ...replayMessages(turns, question, model)];
 
 	if (transcript[0]?.role === "system") return { messages };
