@@ -38,8 +38,15 @@ export const HISTORY_WINDOW = 5;
 const COLLAPSE_KEY = "ctrl+]";
 const MIN_BODY_LINES = 3;
 const MAX_BODY_LINES = 24;
-/** Rows the panel needs around the answer: question list, rules, hint row. */
-const CHROME_LINES = 8;
+/**
+ * Rows Pi keeps for itself while the panel is up: the one transcript row
+ * fullscreen never gives away, the widget spacer, the two-line footer, and one
+ * for an extension status line. Fullscreen cuts a panel that does not fit from
+ * the bottom, which is where the streaming answer and the hint row are.
+ */
+export const HOST_ROWS = 5;
+/** Rows below the answer: the scroll position, a rule, and the hint row. */
+const FOOTER_LINES = 3;
 
 /** One row of the panel's list: a stored exchange, or the question being asked now. */
 export interface PanelItem {
@@ -66,9 +73,14 @@ export interface PanelDeps {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 }
 
-/** How many rows the answer area gets, given the terminal height. */
-export function bodyHeight(terminalRows: number): number {
-	return Math.max(MIN_BODY_LINES, Math.min(MAX_BODY_LINES, terminalRows - CHROME_LINES));
+/**
+ * How many rows the answer area gets. `headerRows` is what the panel has drawn
+ * above it: the question list and the rule under it, up to eight rows once the
+ * history fills, so it is counted rather than assumed.
+ */
+export function bodyHeight(terminalRows: number, headerRows: number): number {
+	const spare = terminalRows - HOST_ROWS - headerRows - FOOTER_LINES;
+	return Math.max(MIN_BODY_LINES, Math.min(MAX_BODY_LINES, spare));
 }
 
 /**
@@ -110,7 +122,12 @@ export function createPanel(deps: PanelDeps) {
 		let scroll = 0;
 		/** Follow a streaming answer down until the user scrolls away from the end. */
 		let stickToEnd = true;
+		/** The answer area's height at the last render, which scrolling is measured against. */
+		let bodyRows = MIN_BODY_LINES;
 		let cachedWidth = -1;
+		// Pi does not invalidate components when the terminal resizes, so a
+		// height-only resize has to miss the cache on its own.
+		let cachedRows = -1;
 		let cachedLines: string[] | undefined;
 
 		// Pi always supplies the manager. The duck-typed check, rather than a
@@ -195,8 +212,10 @@ export function createPanel(deps: PanelDeps) {
 		}
 
 		function render(width: number): string[] {
-			if (cachedLines && cachedWidth === width) return cachedLines;
+			const rows = tui.terminal.rows;
+			if (cachedLines && cachedWidth === width && cachedRows === rows) return cachedLines;
 			cachedWidth = width;
+			cachedRows = rows;
 
 			const lines: string[] = [];
 			const earlier = items.slice(0, Math.max(0, items.length - 1));
@@ -219,10 +238,10 @@ export function createPanel(deps: PanelDeps) {
 			lines.push(rule(width));
 
 			const body = answerLines(width);
-			const height = bodyHeight(tui.terminal.rows);
-			const maxScroll = Math.max(0, body.length - height);
+			bodyRows = bodyHeight(rows, lines.length);
+			const maxScroll = Math.max(0, body.length - bodyRows);
 			scroll = stickToEnd ? maxScroll : Math.min(scroll, maxScroll);
-			lines.push(...body.slice(scroll, scroll + height));
+			lines.push(...body.slice(scroll, scroll + bodyRows));
 			if (maxScroll > 0) lines.push(theme.fg("dim", `— ${scroll + 1}/${maxScroll + 1} —`));
 
 			lines.push(rule(width));
@@ -234,7 +253,7 @@ export function createPanel(deps: PanelDeps) {
 
 		function scrollBy(delta: number) {
 			const body = answerLines(cachedWidth > 0 ? cachedWidth : 80);
-			const maxScroll = Math.max(0, body.length - bodyHeight(tui.terminal.rows));
+			const maxScroll = Math.max(0, body.length - bodyRows);
 			scroll = Math.min(maxScroll, Math.max(0, scroll + delta));
 			stickToEnd = scroll >= maxScroll;
 			refresh();

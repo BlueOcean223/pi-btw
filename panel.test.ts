@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { bodyHeight, createPanel, HISTORY_WINDOW, historyWindow, type PanelItem } from "./panel.js";
+import { bodyHeight, createPanel, HISTORY_WINDOW, HOST_ROWS, historyWindow, type PanelItem } from "./panel.js";
 
 describe("historyWindow", () => {
 	/** Cursor on the live question, i.e. past every earlier one. */
@@ -56,23 +56,28 @@ describe("historyWindow", () => {
 
 describe("bodyHeight", () => {
 	test("grows with the terminal", () => {
-		expect(bodyHeight(30)).toBeGreaterThan(bodyHeight(20));
+		expect(bodyHeight(30, 2)).toBeGreaterThan(bodyHeight(20, 2));
+	});
+
+	test("gives up the rows the question list takes", () => {
+		expect(bodyHeight(30, 8)).toBe(bodyHeight(30, 2) - 6);
 	});
 
 	test("still leaves an answer area on a short terminal", () => {
-		expect(bodyHeight(8)).toBeGreaterThanOrEqual(3);
+		expect(bodyHeight(8, 8)).toBeGreaterThanOrEqual(3);
 	});
 
 	test("stops growing, so the panel never swallows the transcript", () => {
-		expect(bodyHeight(200)).toBe(bodyHeight(400));
+		expect(bodyHeight(200, 2)).toBe(bodyHeight(400, 2));
 	});
 });
 
 /** A panel wired to stub deps, with the calls it made recorded. */
-function mount(questions: string[]) {
+function mount(questions: string[], options: { rows?: number; answer?: (question: string) => string } = {}) {
+	const answer = options.answer ?? ((question: string) => `answer to ${question}`);
 	const items: PanelItem[] = questions.map((question) => ({
 		question,
-		text: () => `answer to ${question}`,
+		text: () => answer(question),
 		pending: () => false,
 		notice: () => undefined,
 	}));
@@ -83,11 +88,36 @@ function mount(questions: string[]) {
 		copy: (text) => calls.copied.push(text),
 		notify: () => {},
 	});
-	const tui = { terminal: { rows: 40, columns: 80 }, requestRender: () => {} };
+	const tui = { terminal: { rows: options.rows ?? 40, columns: 80 }, requestRender: () => {} };
 	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, italic: (t: string) => t };
 	const panel = factory(tui as never, theme as never, undefined as never, (exit) => calls.exits.push(exit));
-	return { panel, items, calls };
+	return { panel, items, calls, tui };
 }
+
+/**
+ * Fullscreen Pi cuts a panel taller than the space it has from the bottom,
+ * taking the newest lines of a streaming answer and the hint row with it.
+ */
+describe("height", () => {
+	const long = () => Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n\n");
+	const questions = (n: number) => Array.from({ length: n }, (_, i) => `question ${i + 1}`);
+
+	test("leaves Pi its rows however many questions are listed", () => {
+		for (const rows of [20, 24, 30, 36, 40, 60]) {
+			for (const count of [1, 3, 8]) {
+				const { panel } = mount(questions(count), { rows, answer: long });
+				expect(panel.render(80).length).toBeLessThanOrEqual(rows - HOST_ROWS);
+			}
+		}
+	});
+
+	test("re-measures when only the terminal height changes", () => {
+		const { panel, tui } = mount(questions(3), { rows: 40, answer: long });
+		const tall = panel.render(80).length;
+		tui.terminal.rows = 24;
+		expect(panel.render(80).length).toBeLessThan(tall);
+	});
+});
 
 describe("clearing the column", () => {
 	test("keeps the item being viewed, not whichever one is last", () => {
