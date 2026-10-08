@@ -8,19 +8,26 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Model, Usage } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Exchange } from "./history.js";
-import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER } from "./prompt.js";
+import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER, wrapQuestion } from "./prompt.js";
 import {
+	appendGoogleSideTurns,
+	appendPiMessagesSideTurns,
 	appendSideTurns,
+	bodyHasImages,
 	endsWithSystemMessage,
+	extendCapturedBody,
 	extractResult,
 	historyTurns,
 	isMessagesBody,
 	type MessagesBody,
+	placeholderContext,
+	replayHeaders,
 	sessionTranscript,
 	shouldRemember,
+	sideTransport,
 	trimTrailingIncompleteTurn,
 } from "./request.js";
 
@@ -143,22 +150,144 @@ describe("historyTurns", () => {
 
 describe("isMessagesBody", () => {
 	test("accepts a body whose conversation lives under `messages`", () => {
-		expect(isMessagesBody({ messages: [], system: "you are pi" })).toBe(true);
-		expect(isMessagesBody({ messages: [], tools: [] })).toBe(true);
+		expect(isMessagesBody({ model: "claude-sonnet-5", messages: [], system: "you are pi" })).toBe(true);
+		expect(isMessagesBody({ model: "glm-5.3", messages: [], tools: [] })).toBe(true);
+	});
+
+	/** The system prompt is one of the messages, and `tools` is only written when there are some. */
+	test("accepts a completions body without tools", () => {
+		const body = { model: "glm-5.3", stream: true, messages: [{ role: "system", content: "you are pi" }] };
+		expect(isMessagesBody(body)).toBe(true);
 	});
 
 	test("rejects a body that carries the conversation under another name", () => {
-		expect(isMessagesBody({ input: [], tools: [] })).toBe(false);
-		expect(isMessagesBody({ contents: [] })).toBe(false);
+		expect(isMessagesBody({ model: "m", input: [], tools: [] })).toBe(false);
+		expect(isMessagesBody({ model: "m", contents: [] })).toBe(false);
 	});
 
-	test("rejects a messages array with neither a prompt nor tools beside it", () => {
+	test("rejects a stray `messages` field with no model beside it", () => {
 		expect(isMessagesBody({ messages: [] })).toBe(false);
+	});
+
+	test("rejects a Converse body, whose model id is `modelId`", () => {
+		expect(isMessagesBody({ modelId: "anthropic.claude", messages: [], system: [{ text: "you are pi" }] })).toBe(false);
 	});
 
 	test("rejects non-objects", () => {
 		expect(isMessagesBody(undefined)).toBe(false);
 		expect(isMessagesBody("{}")).toBe(false);
+	});
+});
+
+describe("extendCapturedBody", () => {
+	const model = { api: "test", provider: "test", id: "test" } as Model<any>;
+	const signal = new AbortController().signal;
+	const extend = (api: string, payload: unknown) => extendCapturedBody(api, payload, [], "q", model, signal);
+
+	/** Converse has `messages` and `system` too, but its entries are `{ role, content: [{ text }] }`. */
+	test("a Converse body gets Converse messages, not role/content strings", () => {
+		const body = { modelId: "anthropic.claude", system: [{ text: "p" }], messages: [{ role: "user", content: [{ text: "hi" }] }] };
+		const after = extend("bedrock-converse-stream", body) as { messages: unknown[] };
+		expect(after.messages.at(-1)).toEqual({ role: "user", content: [{ text: wrapQuestion("q") }] });
+	});
+
+	test("a body is read the way its own API writes it, whatever its field names", () => {
+		const converse = { modelId: "anthropic.claude", system: [{ text: "p" }], messages: [] };
+		expect(extend("anthropic-messages", converse)).toBeUndefined();
+		expect(extend("openai-completions", { model: "m", input: [] })).toBeUndefined();
+	});
+
+	test("an API this extension does not know is rebuilt", () => {
+		expect(extend("custom-extension-api", { model: "m", messages: [] })).toBeUndefined();
+	});
+
+	test("a Messages body ending on a flushed system message is rebuilt", () => {
+		const body = { model: "m", system: "p", messages: [{ role: "user", content: "hi" }, { role: "system", content: "update" }] };
+		expect(extend("anthropic-messages", body)).toBeUndefined();
+	});
+
+	test("the captured body is copied, not appended to in place", () => {
+		const body = { model: "m", contents: [{ role: "user", parts: [{ text: "hi" }] }], config: {} };
+		extend("google-generative-ai", body);
+		expect(body.contents).toHaveLength(1);
+		expect(body.config).toEqual({});
+	});
+});
+
+describe("appendGoogleSideTurns", () => {
+	test("replayed answers are `model` turns and the request carries the given signal", () => {
+		const signal = new AbortController().signal;
+		const body = { model: "gemini", contents: [{ role: "user", parts: [{ text: "hi" }] }], config: { systemInstruction: "p" } };
+		const after = appendGoogleSideTurns(body, [{ question: "q1", answer: "a1" }], "q2", signal);
+		expect(after.contents.slice(1)).toEqual([
+			{ role: "user", parts: [{ text: "q1" }] },
+			{ role: "model", parts: [{ text: "a1" }] },
+			{ role: "user", parts: [{ text: wrapQuestion("q2") }] },
+		]);
+		expect(after.config).toEqual({ systemInstruction: "p", abortSignal: signal });
+	});
+});
+
+describe("appendPiMessagesSideTurns", () => {
+	test("appended turns are Pi messages, and the options stay as captured", () => {
+		const model = { api: "pi-messages", provider: "pi", id: "m" } as Model<any>;
+		const body = {
+			model: "m",
+			context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			options: { sessionId: "s1", maxTokens: 4096 },
+		};
+		const after = appendPiMessagesSideTurns(body, [{ question: "q1", answer: "a1" }], "q2", model);
+		expect(after.options).toEqual(body.options);
+		expect(after.context.messages.slice(1)).toMatchObject([
+			{ role: "user", content: [{ type: "text", text: "q1" }] },
+			{ role: "assistant", content: [{ type: "text", text: "a1" }], api: "pi-messages", provider: "pi", model: "m" },
+			{ role: "user", content: [{ type: "text", text: wrapQuestion("q2") }] },
+		]);
+	});
+});
+
+describe("placeholderContext", () => {
+	test("carries an image only when asked to, so Copilot sends its vision header", () => {
+		expect(placeholderContext("q").messages[0]).toMatchObject({ content: [{ type: "text", text: "q" }] });
+		const content = (placeholderContext("q", true).messages[0] as { content: { type: string }[] }).content;
+		expect(content.map((block) => block.type)).toEqual(["text", "image"]);
+	});
+
+	test("an image anywhere in a captured body is found", () => {
+		expect(bodyHasImages({ messages: [{ role: "user", content: [{ type: "image", source: {} }] }] })).toBe(true);
+		expect(bodyHasImages({ messages: [{ role: "user", content: [{ type: "image_url", image_url: {} }] }] })).toBe(true);
+		expect(bodyHasImages({ input: [{ role: "user", content: [{ type: "input_image", image_url: "" }] }] })).toBe(true);
+		expect(bodyHasImages({ messages: [{ role: "user", content: [{ type: "text", text: "image" }] }] })).toBe(false);
+	});
+});
+
+describe("replayHeaders", () => {
+	test("headers the main loop's wrapper added are replayed", () => {
+		const captured = { "x-opencode-session": "s1", "X-Route": "blue" };
+		expect(replayHeaders(captured, {})).toEqual(captured);
+	});
+
+	/** An OAuth token refreshed since the captured request must not go out stale. */
+	test("credentials resolved now win, whatever the case of the name", () => {
+		const captured = { Authorization: "Bearer old", "x-route": "blue" };
+		expect(replayHeaders(captured, { authorization: "Bearer new" })).toEqual({
+			"x-route": "blue",
+			authorization: "Bearer new",
+		});
+	});
+});
+
+describe("sideTransport", () => {
+	const api = (name: string) => ({ api: name }) as Model<any>;
+
+	test("Codex always goes over SSE, leaving the main loop's WebSocket to it", () => {
+		expect(sideTransport(api("openai-codex-responses"), "auto")).toBe("sse");
+		expect(sideTransport(api("openai-codex-responses"), undefined)).toBe("sse");
+	});
+
+	test("anything else gets the configured transport", () => {
+		expect(sideTransport(api("anthropic-messages"), "websocket")).toBe("websocket");
+		expect(sideTransport(api("anthropic-messages"), undefined)).toBeUndefined();
 	});
 });
 

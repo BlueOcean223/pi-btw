@@ -34,7 +34,7 @@ import {
 } from "./history.js";
 import { createPanel, type PanelExit, type PanelItem } from "./panel.js";
 import { runSideQuestion, shouldRemember, type SideResult } from "./request.js";
-import { recordSnapshot } from "./snapshot.js";
+import { notePendingHeaders, recordSnapshot } from "./snapshot.js";
 
 const USAGE = "用法：/btw <问题>";
 const TUI_ONLY = "/btw 只在交互界面可用，这次没有发出请求";
@@ -73,6 +73,11 @@ export default function btw(pi: ExtensionAPI) {
 		}
 		// Observe only. Returning a payload here would rewrite the main request.
 		return undefined;
+	});
+
+	// Observe only, like the body hook: the handler must not edit the headers.
+	pi.on("before_provider_headers", (event) => {
+		notePendingHeaders(event.headers);
 	});
 
 	pi.registerCommand("btw", {

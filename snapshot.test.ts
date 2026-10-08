@@ -9,7 +9,14 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Model } from "@earendil-works/pi-ai";
-import { getSnapshot, isCacheWarmProbe, markOwnPayload, recordSnapshot, resetSnapshot } from "./snapshot.js";
+import {
+	getSnapshot,
+	isCacheWarmProbe,
+	markOwnPayload,
+	notePendingHeaders,
+	recordSnapshot,
+	resetSnapshot,
+} from "./snapshot.js";
 
 const model = { provider: "anthropic", id: "claude-sonnet-5", api: "anthropic-messages" } as Model<any>;
 
@@ -33,6 +40,10 @@ describe("isCacheWarmProbe", () => {
 		expect(isCacheWarmProbe({ max_completion_tokens: 1 })).toBe(true);
 		expect(isCacheWarmProbe({ max_output_tokens: 1 })).toBe(true);
 		expect(isCacheWarmProbe({ generationConfig: { maxOutputTokens: 1 } })).toBe(true);
+		expect(isCacheWarmProbe({ maxTokens: 1 })).toBe(true);
+		expect(isCacheWarmProbe({ config: { maxOutputTokens: 1 } })).toBe(true);
+		expect(isCacheWarmProbe({ inferenceConfig: { maxTokens: 1 } })).toBe(true);
+		expect(isCacheWarmProbe({ options: { maxTokens: 1 } })).toBe(true);
 	});
 
 	/** OpenAI Responses rejects a cap under 16 and clamps the probe up to it. */
@@ -75,6 +86,33 @@ describe("recordSnapshot", () => {
 		capture(payload);
 		payload.messages.push("added later");
 		expect((getSnapshot("s1", model)?.payload as { messages: string[] }).messages).toEqual(["first"]);
+	});
+
+	/** Node clones a signal into `{}` and Bun refuses it; either way it is no signal the SDK can use. */
+	test("drops the abort signal Pi's Google adapters put in the body, and leaves the main body alone", () => {
+		const signal = new AbortController().signal;
+		const payload = { model: "gemini", contents: [], config: { systemInstruction: "p", abortSignal: signal } };
+		capture(payload);
+		expect(getSnapshot("s1", model)?.payload).toEqual({ model: "gemini", contents: [], config: { systemInstruction: "p" } });
+		expect(payload.config.abortSignal).toBe(signal);
+	});
+});
+
+describe("captured headers", () => {
+	test("the headers resolved for a request are kept with its body, as they stand when it arrives", () => {
+		const headers: Record<string, string | null> = { "x-opencode-session": "s1" };
+		notePendingHeaders(headers);
+		// A later `before_provider_headers` handler, editing in place.
+		headers["x-route"] = "blue";
+		capture({ messages: [], system: "p", max_tokens: 100 });
+		expect(getSnapshot("s1", model)?.headers).toEqual({ "x-opencode-session": "s1", "x-route": "blue" });
+	});
+
+	test("a body is not paired with headers from a request before it", () => {
+		notePendingHeaders({ "x-route": "warm" });
+		capture({ messages: [], system: "p", max_tokens: 1 });
+		capture({ messages: [], system: "p", max_tokens: 100 });
+		expect(getSnapshot("s1", model)?.headers).toBeUndefined();
 	});
 });
 

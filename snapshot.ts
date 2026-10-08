@@ -14,7 +14,7 @@
  * outbound request; the next main request refreshes it.
  */
 
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 
 export interface Snapshot {
 	sessionId: string;
@@ -22,9 +22,36 @@ export interface Snapshot {
 	modelId: string;
 	api: string;
 	payload: unknown;
+	/**
+	 * The headers the main loop's request wrapper settled on for this request:
+	 * session routing such as OpenCode's, attribution, and whatever
+	 * `before_provider_headers` handlers added. The side question does not go
+	 * through that wrapper, so these are the only copy it can get.
+	 */
+	headers?: ProviderHeaders;
 }
 
 let current: Snapshot | undefined;
+
+/**
+ * Headers seen since the last captured body.
+ *
+ * pi resolves headers before the adapter builds the body, so for one request
+ * `before_provider_headers` fires first and `before_provider_request` second.
+ * Compaction and summaries fire only the first; the next main request
+ * overwrites what they left here before its body arrives.
+ */
+let pendingHeaders: ProviderHeaders | undefined;
+
+/**
+ * Remember the header object a request is about to send.
+ *
+ * Handlers edit it in place and in order, so the reference is kept and copied
+ * only when the body arrives, by which point every handler has run.
+ */
+export function notePendingHeaders(headers: ProviderHeaders): void {
+	pendingHeaders = headers;
+}
 
 /**
  * Bodies this extension produced.
@@ -71,14 +98,38 @@ export function isCacheWarmProbe(payload: unknown): boolean {
 	const body = payload as Record<string, unknown>;
 	const capped = (value: unknown) => typeof value === "number" && value > 0 && value <= PROBE_OUTPUT_CAP;
 
-	for (const field of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
+	// `maxTokens` is Mistral's spelling.
+	for (const field of ["max_tokens", "max_completion_tokens", "max_output_tokens", "maxTokens"]) {
 		if (capped(body[field])) return true;
 	}
-	const generation = body.generationConfig;
-	if (generation && typeof generation === "object") {
-		if (capped((generation as Record<string, unknown>).maxOutputTokens)) return true;
+	// Where the cap nests: Gemini REST, Pi's Google adapter, Bedrock, pi-messages.
+	const nested: [string, string][] = [
+		["generationConfig", "maxOutputTokens"],
+		["config", "maxOutputTokens"],
+		["inferenceConfig", "maxTokens"],
+		["options", "maxTokens"],
+	];
+	for (const [parent, field] of nested) {
+		const value = body[parent];
+		if (value && typeof value === "object" && capped((value as Record<string, unknown>)[field])) return true;
 	}
 	return false;
+}
+
+/**
+ * The body without the live objects some adapters put into it.
+ *
+ * Pi's Google adapters hand the SDK its abort signal inside the body, as
+ * `config.abortSignal`. Node's `structuredClone` turns a signal into an empty
+ * object and Bun's refuses it, so a copied signal is never one the SDK can
+ * use. It is dropped here; the side question puts its own in.
+ */
+function withoutLiveObjects(payload: unknown): unknown {
+	if (!payload || typeof payload !== "object") return payload;
+	const config = (payload as Record<string, unknown>).config;
+	if (!config || typeof config !== "object" || !("abortSignal" in config)) return payload;
+	const { abortSignal: _signal, ...rest } = config as Record<string, unknown>;
+	return { ...payload, config: rest };
 }
 
 /**
@@ -89,9 +140,15 @@ export function isCacheWarmProbe(payload: unknown): boolean {
  * out to the caller, which drops it rather than let the main request fail.
  */
 export function recordSnapshot(snapshot: Snapshot): void {
+	const headers = pendingHeaders;
+	pendingHeaders = undefined;
 	if (isOwnPayload(snapshot.payload)) return;
 	if (isCacheWarmProbe(snapshot.payload)) return;
-	current = { ...snapshot, payload: structuredClone(snapshot.payload) };
+	current = {
+		...snapshot,
+		payload: structuredClone(withoutLiveObjects(snapshot.payload)),
+		...(headers ? { headers: { ...headers } } : {}),
+	};
 }
 
 /**
@@ -117,4 +174,5 @@ export function getSnapshot(sessionId: string, model: Model<any>): Snapshot | un
 /** Test seam. Not called by the extension. */
 export function resetSnapshot(): void {
 	current = undefined;
+	pendingHeaders = undefined;
 }

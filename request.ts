@@ -2,11 +2,11 @@
  * Building one side-question request, and reading one answer back out.
  *
  * Two ways in. The first rewrites the snapshot of the main loop's last request
- * body: append the earlier exchanges and the new question to `messages` or
- * Responses `input`, then hand the result to the provider through `onPayload`. That
- * is what keeps the prefix byte-identical and the cache warm. The second, used
- * when there is no usable snapshot, rebuilds the context from the session
- * transcript and accepts a cache miss.
+ * body: append the earlier exchanges and the new question wherever that API
+ * keeps the conversation, then hand the result to the provider through
+ * `onPayload`. That is what keeps the prefix byte-identical and the cache warm.
+ * The second, used when there is no usable snapshot, rebuilds the context from
+ * the session transcript and accepts a cache miss.
  *
  * The tool schemas stay in the request in both paths. Dropping them would save
  * tokens and lose the cache: tools sit in the prefix, so a request without them
@@ -17,7 +17,17 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	ProviderHeaders,
+	SimpleStreamOptions,
+	TextContent,
+	Tool,
+} from "@earendil-works/pi-ai";
 import type { Exchange } from "./history.js";
 import {
 	CUT_OFF_TAIL,
@@ -26,7 +36,7 @@ import {
 	replayAssistant,
 	wrapQuestion,
 } from "./prompt.js";
-import { getSnapshot, markOwnPayload } from "./snapshot.js";
+import { getSnapshot, markOwnPayload, type Snapshot } from "./snapshot.js";
 
 export interface SideResult {
 	/** The answer as it should be shown, including any appended notice. */
@@ -143,15 +153,18 @@ export interface MessagesBody {
 }
 
 /**
- * Whether a captured body is one whose `messages` array takes plain
- * `{ role, content }` entries — Anthropic Messages and the OpenAI completions
- * shape both do. Responses bodies use `input` and are handled separately.
+ * Whether a captured body has a model id and a `messages` array beside it.
+ *
+ * Which API the body belongs to is settled before this runs, by the model the
+ * snapshot was taken under; this only confirms the body has the shape that API
+ * sends. A completions request without tools has nothing beside `messages` but
+ * the model and its options, its system prompt being one of the messages, so
+ * the test cannot ask for a top-level `system` or `tools`.
  */
 export function isMessagesBody(payload: unknown): payload is MessagesBody {
 	if (!payload || typeof payload !== "object") return false;
 	const body = payload as Record<string, unknown>;
-	if (!Array.isArray(body.messages)) return false;
-	return body.system !== undefined || Array.isArray(body.tools);
+	return typeof body.model === "string" && Array.isArray(body.messages);
 }
 
 /** An OpenAI Responses body, including its opaque reasoning and tool items. */
@@ -183,6 +196,153 @@ export function appendResponsesSideTurns(
 	}
 	input.push(user(wrapQuestion(question)));
 	return { ...body, input };
+}
+
+/** A Google Gemini or Vertex body, as Pi's Google adapters hand it to the SDK. */
+export interface GoogleBody {
+	model: string;
+	contents: unknown[];
+	config?: Record<string, unknown>;
+	[key: string]: unknown;
+}
+
+export function isGoogleBody(payload: unknown): payload is GoogleBody {
+	if (!payload || typeof payload !== "object") return false;
+	const body = payload as Record<string, unknown>;
+	if (body.config !== undefined && (!body.config || typeof body.config !== "object")) return false;
+	return typeof body.model === "string" && Array.isArray(body.contents);
+}
+
+/**
+ * Append Gemini contents, and give the request its own abort signal.
+ *
+ * The SDK takes the signal from `config.abortSignal`, inside the body. The
+ * snapshot was stored without the main loop's, and putting none back would
+ * leave the side question impossible to cancel.
+ */
+export function appendGoogleSideTurns(
+	body: GoogleBody,
+	turns: readonly ReplayTurn[],
+	question: string,
+	signal: AbortSignal,
+): GoogleBody {
+	const contents = [...body.contents];
+	for (const turn of turns) {
+		contents.push({ role: "user", parts: [{ text: turn.question }] });
+		contents.push({ role: "model", parts: [{ text: turn.answer }] });
+	}
+	contents.push({ role: "user", parts: [{ text: wrapQuestion(question) }] });
+	return { ...body, contents, config: { ...body.config, abortSignal: signal } };
+}
+
+/** A Bedrock Converse command input. */
+export interface BedrockBody {
+	modelId: string;
+	messages: unknown[];
+	[key: string]: unknown;
+}
+
+/**
+ * Whether a captured body is a Converse command input.
+ *
+ * Converse also has `messages` and `system`, but each message's content is a
+ * list of `{ text }` blocks, and the model id is `modelId`. A `{ role,
+ * content: string }` entry is not something Converse accepts.
+ */
+export function isBedrockBody(payload: unknown): payload is BedrockBody {
+	if (!payload || typeof payload !== "object") return false;
+	const body = payload as Record<string, unknown>;
+	return typeof body.modelId === "string" && Array.isArray(body.messages);
+}
+
+/**
+ * Append Converse messages.
+ *
+ * The cache point the adapter put on the last prefix message stays where it is,
+ * and nothing appended carries one, for the same reason as `appendSideTurns`.
+ */
+export function appendBedrockSideTurns(body: BedrockBody, turns: readonly ReplayTurn[], question: string): BedrockBody {
+	const messages = [...body.messages];
+	for (const turn of turns) {
+		messages.push({ role: "user", content: [{ text: turn.question }] });
+		messages.push({ role: "assistant", content: [{ text: turn.answer }] });
+	}
+	messages.push({ role: "user", content: [{ text: wrapQuestion(question) }] });
+	return { ...body, messages };
+}
+
+/** A pi-messages body: Pi's own context, sent as it is, with the request options beside it. */
+export interface PiMessagesBody {
+	model: string;
+	context: { messages: unknown[]; [key: string]: unknown };
+	[key: string]: unknown;
+}
+
+export function isPiMessagesBody(payload: unknown): payload is PiMessagesBody {
+	if (!payload || typeof payload !== "object") return false;
+	const body = payload as Record<string, unknown>;
+	const context = body.context as Record<string, unknown> | undefined;
+	return typeof body.model === "string" && !!context && typeof context === "object" && Array.isArray(context.messages);
+}
+
+/**
+ * Append Pi messages to the captured context.
+ *
+ * The server converts this context for whichever provider sits behind it, so
+ * the appended turns are Pi messages, exactly as the rebuild path would add
+ * them. `options`, which carries the session id, is left as the main loop sent
+ * it.
+ */
+export function appendPiMessagesSideTurns(
+	body: PiMessagesBody,
+	turns: readonly ReplayTurn[],
+	question: string,
+	model: Model<any>,
+): PiMessagesBody {
+	const messages = [...body.context.messages, ...replayMessages(turns, question, model)];
+	return { ...body, context: { ...body.context, messages } };
+}
+
+/**
+ * The captured body with the side turns appended, or undefined when it cannot
+ * be reused and the context has to be rebuilt.
+ *
+ * The API decides where the conversation lives, not the field names: Bedrock
+ * also has `messages` and `system`, with entries of another shape. An API not
+ * listed here, such as one an extension registered, is rebuilt.
+ */
+export function extendCapturedBody(
+	api: string,
+	payload: unknown,
+	turns: readonly ReplayTurn[],
+	question: string,
+	model: Model<any>,
+	signal: AbortSignal,
+): unknown {
+	switch (api) {
+		case "anthropic-messages":
+		case "openai-completions":
+		case "mistral-conversations":
+			if (!isMessagesBody(payload) || endsWithSystemMessage(payload)) return undefined;
+			return appendSideTurns(structuredClone(payload), turns, question);
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			if (!isResponsesBody(payload)) return undefined;
+			return appendResponsesSideTurns(structuredClone(payload), turns, question);
+		case "google-generative-ai":
+		case "google-vertex":
+			if (!isGoogleBody(payload)) return undefined;
+			return appendGoogleSideTurns(structuredClone(payload), turns, question, signal);
+		case "bedrock-converse-stream":
+			if (!isBedrockBody(payload)) return undefined;
+			return appendBedrockSideTurns(structuredClone(payload), turns, question);
+		case "pi-messages":
+			if (!isPiMessagesBody(payload)) return undefined;
+			return appendPiMessagesSideTurns(structuredClone(payload), turns, question, model);
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -340,9 +500,72 @@ function rebuildContext(
 	return { systemPrompt: ctx.getSystemPrompt(), messages, tools };
 }
 
-/** A throwaway context for the snapshot path: `onPayload` discards the body built from it. */
-function placeholderContext(question: string): Context {
-	return { messages: [{ role: "user", content: [{ type: "text", text: question }], timestamp: Date.now() }] };
+/** The smallest valid PNG, for a placeholder that only has to contain an image. */
+const PLACEHOLDER_IMAGE =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+/** Image part types in the bodies Pi sends: Anthropic, Chat Completions, Responses. */
+const IMAGE_PART_TYPES = new Set(["image", "image_url", "input_image"]);
+
+export function bodyHasImages(value: unknown): boolean {
+	if (Array.isArray(value)) return value.some(bodyHasImages);
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (typeof record.type === "string" && IMAGE_PART_TYPES.has(record.type)) return true;
+	return Object.values(record).some(bodyHasImages);
+}
+
+/**
+ * A throwaway context for the snapshot path: `onPayload` discards the body
+ * built from it.
+ *
+ * The body goes, but not everything the adapter worked out from this context
+ * goes with it. GitHub Copilot's adapters set `Copilot-Vision-Request` from
+ * whether the context has an image, before `onPayload` swaps the body, and
+ * Copilot turns away a request whose body has images and whose headers do not
+ * say so. When the captured body has images, the placeholder carries one too.
+ */
+export function placeholderContext(question: string, withImage = false): Context {
+	const content: (TextContent | ImageContent)[] = [{ type: "text", text: question }];
+	if (withImage) content.push({ type: "image", data: PLACEHOLDER_IMAGE, mimeType: "image/png" });
+	return { messages: [{ role: "user", content, timestamp: Date.now() }] };
+}
+
+/**
+ * Headers for the side question: the main request's, under the credentials
+ * resolved now.
+ *
+ * The main loop's request wrapper adds headers the adapter never sees as
+ * options: OpenCode's session routing, attribution, and whatever
+ * `before_provider_headers` handlers set. The side question cannot run that
+ * wrapper, so it replays what the wrapper produced for the captured request.
+ * A header the provider's auth supplies this time wins over the copy, compared
+ * without regard to case, so a token refreshed since then is not sent stale.
+ */
+export function replayHeaders(captured: ProviderHeaders, fresh: ProviderHeaders): ProviderHeaders {
+	const freshNames = new Set(Object.keys(fresh).map((name) => name.toLowerCase()));
+	const merged: ProviderHeaders = {};
+	for (const [name, value] of Object.entries(captured)) {
+		if (!freshNames.has(name.toLowerCase())) merged[name] = value;
+	}
+	return { ...merged, ...fresh };
+}
+
+/**
+ * The transport for a side question.
+ *
+ * Only the Codex adapter reads it. On `auto` that adapter reuses the session's
+ * WebSocket and, when the new input does not continue the last response,
+ * drops the connection's continuation state and stores the side question's in
+ * its place. The main loop's next request then has to resend everything. SSE
+ * leaves that WebSocket alone, and the prompt cache still matches on
+ * `prompt_cache_key` and the prefix, which the side question keeps.
+ */
+export function sideTransport(
+	model: Model<any>,
+	configured: SimpleStreamOptions["transport"],
+): SimpleStreamOptions["transport"] {
+	return model.api === "openai-codex-responses" ? "sse" : configured;
 }
 
 export interface SideRequestOptions {
@@ -368,18 +591,13 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 
 	try {
 		const turns = historyTurns(history);
-		const snapshot = getSnapshot(sessionId, model);
+		const snapshot: Snapshot | undefined = getSnapshot(sessionId, model);
 
 		let context: Context;
-		let payload: unknown;
-		if (snapshot && isMessagesBody(snapshot.payload) && !endsWithSystemMessage(snapshot.payload)) {
-			payload = appendSideTurns(structuredClone(snapshot.payload), turns, question);
-		} else if (snapshot && isResponsesBody(snapshot.payload)) {
-			payload = appendResponsesSideTurns(structuredClone(snapshot.payload), turns, question);
-		}
+		const payload = snapshot && extendCapturedBody(snapshot.api, snapshot.payload, turns, question, model, signal);
 		if (payload !== undefined) {
 			markOwnPayload(payload);
-			context = placeholderContext(question);
+			context = placeholderContext(question, model.provider === "github-copilot" && bodyHasImages(payload));
 		} else {
 			context = rebuildContext(ctx, pi, turns, question, model);
 		}
@@ -389,6 +607,13 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 		// has to be a level this model accepts.
 		const level = ctx.thinkingLevel ?? pi.getThinkingLevel();
 
+		// What the main loop's request wrapper adds from settings. Only the
+		// rebuild path's body depends on the thinking budgets; on the snapshot
+		// path the captured body already has them.
+		const settings = pi.getSettings?.();
+		const transport = sideTransport(model, settings?.transport);
+		const capturedHeaders = snapshot?.headers;
+
 		// Auth failures surface synchronously here on some providers, which is
 		// why the request is built inside the same guard that reads it.
 		const stream = ctx.modelRegistry.streamSimple(model, context, {
@@ -397,6 +622,11 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 			// alone cannot preserve those headers. The rebuild path needs it too.
 			sessionId,
 			...(level === "off" ? {} : { reasoning: level }),
+			...(transport === undefined ? {} : { transport }),
+			...(settings?.thinkingBudgets === undefined ? {} : { thinkingBudgets: settings.thinkingBudgets }),
+			...(capturedHeaders === undefined
+				? {}
+				: { transformHeaders: (fresh: ProviderHeaders) => replayHeaders(capturedHeaders, fresh) }),
 			...(payload === undefined ? {} : { onPayload: () => payload }),
 		});
 
