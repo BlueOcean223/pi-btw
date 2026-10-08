@@ -61,9 +61,10 @@ pi --extension ./index.ts
 - **旁问看见的是主循环上次发出去的那份请求**，不是它的回复。这之后才落进会话的工具结果，要等主循环再发一次，下一句 `/btw` 才看得见。
 - **面板开着的时候它占着键盘**，主任务的中断键按不到。先关面板。
 - **问答列表活得和进程一样久。** 切到别的会话再切回来还在；退出或 `/reload` 之后就没了，空 `/btw` 又只剩用法提示。
+- **支持复用 Anthropic Messages、OpenAI Chat Completions 和 Responses 的请求快照。** Responses 的 `input`、缓存键和请求参数会保留；旁问也传递主会话的 `sessionId`，供适配器生成会话请求头。实际命中仍取决于服务端缓存是否有效，以及网关如何路由请求。
 - **不是每次主请求都能当前缀复用。** 在接受中途 system 消息的那几个 Claude 模型上，body 若以一条提示词分段更新结尾，
   就不复用它，这次旁问改走重建，缓存要等主循环下次发请求才重新命中。
-- **`PI_BTW_DEBUG=1`** 会在每次回答之后打一行 `cacheRead`/`cacheWrite`。命中的第二次旁问应该大部分从缓存读、几乎不写；读是 0 而写接近整段上下文，说明前缀和主请求不一致了。
+- **`PI_BTW_DEBUG=1`** 会在每次回答之后打一行 `cacheRead`/`cacheWrite`。命中的第二次旁问应该大部分从缓存读、几乎不写；读是 0 时，需要检查前缀、缓存有效期和请求路由。OpenAI 的 `cacheWrite` 通常为 0，不能用它判断是否未命中。
 
 ## 这一版明确不做
 
@@ -75,7 +76,7 @@ pi --extension ./index.ts
 ## 开发
 
 ```bash
-bun test ./*.test.ts   # 纯函数：复用改写、抽取分叉、cache_control 位置
+bun test ./*.test.ts   # 单测及本地 HTTP 请求捕获，不调用模型服务
 bun x tsc --noEmit
 ```
 

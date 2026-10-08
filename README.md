@@ -61,10 +61,11 @@ pi --extension ./index.ts
 - **A side question sees the main loop's last outbound request**, not the response to it. A tool result recorded since then shows up in the next side question, after the main loop sends again.
 - **While the panel is up it owns the keyboard**, so the main task's interrupt key is not reachable. Close the panel first.
 - **The exchange list lives for as long as the process does.** Switching sessions and back keeps it; quitting or `/reload` drops it, and an empty `/btw` is back to the usage line.
+- **Snapshots support Anthropic Messages, OpenAI Chat Completions and Responses.** Responses keeps the captured `input`, cache key and request options. Side questions also pass the main session's `sessionId` so adapters preserve session routing headers. Cache hits still depend on the provider's cache lifetime and gateway routing.
 - **Not every request makes a reusable prefix.** On the Claude models that accept mid-conversation
   system messages, a body ending on a prompt-section update is left alone and the question is rebuilt
   instead, which misses the cache until the main loop sends again.
-- **`PI_BTW_DEBUG=1`** prints `cacheRead`/`cacheWrite` after each answer. A warm second question reads most of the context and writes almost nothing; a zero read next to a large write means the prefix diverged from the main request's.
+- **`PI_BTW_DEBUG=1`** prints `cacheRead`/`cacheWrite` after each answer. A warm second question reads most of the context and writes almost nothing; when reads are zero, check the prefix, cache lifetime and request routing. OpenAI usually reports zero `cacheWrite`, so that field cannot identify a cache miss.
 
 ## Not in this version
 
@@ -76,7 +77,7 @@ pi --extension ./index.ts
 ## Development
 
 ```bash
-bun test ./*.test.ts   # pure functions: replay rewrite, extraction, cache-control placement
+bun test ./*.test.ts   # unit tests and local HTTP capture; no model service calls
 bun x tsc --noEmit
 ```
 

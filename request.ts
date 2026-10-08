@@ -2,8 +2,8 @@
  * Building one side-question request, and reading one answer back out.
  *
  * Two ways in. The first rewrites the snapshot of the main loop's last request
- * body: append the earlier exchanges and the new question to `messages`, change
- * nothing else, and hand the result to the provider through `onPayload`. That
+ * body: append the earlier exchanges and the new question to `messages` or
+ * Responses `input`, then hand the result to the provider through `onPayload`. That
  * is what keeps the prefix byte-identical and the cache warm. The second, used
  * when there is no usable snapshot, rebuilds the context from the session
  * transcript and accepts a cache miss.
@@ -145,14 +145,44 @@ export interface MessagesBody {
 /**
  * Whether a captured body is one whose `messages` array takes plain
  * `{ role, content }` entries — Anthropic Messages and the OpenAI completions
- * shape both do. Bodies that carry the conversation under another name
- * (`input`, `contents`) fall through to the rebuild path.
+ * shape both do. Responses bodies use `input` and are handled separately.
  */
 export function isMessagesBody(payload: unknown): payload is MessagesBody {
 	if (!payload || typeof payload !== "object") return false;
 	const body = payload as Record<string, unknown>;
 	if (!Array.isArray(body.messages)) return false;
 	return body.system !== undefined || Array.isArray(body.tools);
+}
+
+/** An OpenAI Responses body, including its opaque reasoning and tool items. */
+export interface ResponsesBody {
+	model: string;
+	input: unknown[];
+	[key: string]: unknown;
+}
+
+export function isResponsesBody(payload: unknown): payload is ResponsesBody {
+	if (!payload || typeof payload !== "object") return false;
+	const body = payload as Record<string, unknown>;
+	return typeof body.model === "string" && Array.isArray(body.input);
+}
+
+/** Append Responses items without reserializing the captured prefix or its options. */
+export function appendResponsesSideTurns(
+	body: ResponsesBody,
+	turns: readonly ReplayTurn[],
+	question: string,
+): ResponsesBody {
+	const input = [...body.input];
+	const user = (text: string) => ({ role: "user", content: [{ type: "input_text", text }] });
+	for (const turn of turns) {
+		input.push(user(turn.question));
+		// Stored answers have text, not provider output IDs. Responses accepts
+		// this plain assistant input form without inventing an output item ID.
+		input.push({ role: "assistant", content: turn.answer });
+	}
+	input.push(user(wrapQuestion(question)));
+	return { ...body, input };
 }
 
 /**
@@ -342,9 +372,12 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 
 		let context: Context;
 		let payload: unknown;
-		const reusable = snapshot && isMessagesBody(snapshot.payload) && !endsWithSystemMessage(snapshot.payload);
-		if (reusable) {
-			payload = appendSideTurns(structuredClone(snapshot.payload) as MessagesBody, turns, question);
+		if (snapshot && isMessagesBody(snapshot.payload) && !endsWithSystemMessage(snapshot.payload)) {
+			payload = appendSideTurns(structuredClone(snapshot.payload), turns, question);
+		} else if (snapshot && isResponsesBody(snapshot.payload)) {
+			payload = appendResponsesSideTurns(structuredClone(snapshot.payload), turns, question);
+		}
+		if (payload !== undefined) {
 			markOwnPayload(payload);
 			context = placeholderContext(question);
 		} else {
@@ -360,6 +393,9 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 		// why the request is built inside the same guard that reads it.
 		const stream = ctx.modelRegistry.streamSimple(model, context, {
 			signal,
+			// Adapters also use this for HTTP session routing; preserving the body
+			// alone cannot preserve those headers. The rebuild path needs it too.
+			sessionId,
 			...(level === "off" ? {} : { reasoning: level }),
 			...(payload === undefined ? {} : { onPayload: () => payload }),
 		});
