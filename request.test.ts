@@ -13,9 +13,11 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Exchange } from "./history.js";
 import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER, wrapQuestion } from "./prompt.js";
 import {
+	appendBedrockSideTurns,
 	appendGoogleSideTurns,
 	appendPiMessagesSideTurns,
 	appendSideTurns,
+	bodyEndsOnToolResult,
 	bodyHasImages,
 	endsWithSystemMessage,
 	extendCapturedBody,
@@ -185,10 +187,18 @@ describe("extendCapturedBody", () => {
 	const extend = (api: string, payload: unknown) => extendCapturedBody(api, payload, [], "q", model, signal);
 
 	/** Converse has `messages` and `system` too, but its entries are `{ role, content: [{ text }] }`. */
-	test("a Converse body gets Converse messages, not role/content strings", () => {
-		const body = { modelId: "anthropic.claude", system: [{ text: "p" }], messages: [{ role: "user", content: [{ text: "hi" }] }] };
+	test("a Converse body ending on user keeps that message and appends the question after its blocks", () => {
+		const cachePoint = { cachePoint: { type: "default" } };
+		const body = {
+			modelId: "anthropic.claude",
+			system: [{ text: "p" }],
+			messages: [{ role: "user", content: [{ text: "hi" }, cachePoint] }],
+		};
 		const after = extend("bedrock-converse-stream", body) as { messages: unknown[] };
-		expect(after.messages.at(-1)).toEqual({ role: "user", content: [{ text: wrapQuestion("q") }] });
+		expect(after.messages).toEqual([
+			{ role: "user", content: [{ text: "hi" }, cachePoint, { text: wrapQuestion("q") }] },
+		]);
+		expect(body.messages[0]!.content).toHaveLength(2);
 	});
 
 	test("a body is read the way its own API writes it, whatever its field names", () => {
@@ -246,11 +256,50 @@ describe("appendPiMessagesSideTurns", () => {
 	});
 });
 
+describe("appendBedrockSideTurns", () => {
+	test("history after a trailing user message still alternates", () => {
+		const body = { modelId: "m", messages: [{ role: "user", content: [{ text: "hi" }] }] };
+		const after = appendBedrockSideTurns(body, [{ question: "q1", answer: "a1" }], "q2");
+		expect(after.messages).toEqual([
+			{ role: "user", content: [{ text: "hi" }, { text: "q1" }] },
+			{ role: "assistant", content: [{ text: "a1" }] },
+			{ role: "user", content: [{ text: wrapQuestion("q2") }] },
+		]);
+		expect(body.messages).toEqual([{ role: "user", content: [{ text: "hi" }] }]);
+	});
+
+	test("a body already ending on assistant gets a new user message", () => {
+		const body = {
+			modelId: "m",
+			messages: [
+				{ role: "user", content: [{ text: "hi" }] },
+				{ role: "assistant", content: [{ text: "ok" }] },
+			],
+		};
+		const after = appendBedrockSideTurns(body, [], "q");
+		expect(after.messages.slice(0, 2)).toEqual(body.messages);
+		expect(after.messages[2]).toEqual({ role: "user", content: [{ text: wrapQuestion("q") }] });
+	});
+});
+
 describe("placeholderContext", () => {
 	test("carries an image only when asked to, so Copilot sends its vision header", () => {
 		expect(placeholderContext("q").messages[0]).toMatchObject({ content: [{ type: "text", text: "q" }] });
-		const content = (placeholderContext("q", true).messages[0] as { content: { type: string }[] }).content;
+		const content = (placeholderContext("q", { withImage: true }).messages[0] as { content: { type: string }[] }).content;
 		expect(content.map((block) => block.type)).toEqual(["text", "image"]);
+	});
+
+	test("an agent-initiated placeholder does not end on a user message", () => {
+		const messages = placeholderContext("q", { withImage: true, agentInitiated: true }).messages;
+		expect(messages[0]).toMatchObject({ role: "user" });
+		expect(messages.at(-1)?.role).toBe("toolResult");
+	});
+
+	test("a tool result is recognized in each wire shape Copilot sends", () => {
+		expect(bodyEndsOnToolResult({ messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t" }] }] })).toBe(true);
+		expect(bodyEndsOnToolResult({ messages: [{ role: "tool", tool_call_id: "t", content: "ok" }] })).toBe(true);
+		expect(bodyEndsOnToolResult({ input: [{ type: "function_call_output", call_id: "t", output: "ok" }] })).toBe(true);
+		expect(bodyEndsOnToolResult({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] })).toBe(false);
 	});
 
 	test("an image anywhere in a captured body is found", () => {

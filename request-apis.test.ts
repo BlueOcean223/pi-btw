@@ -224,7 +224,7 @@ describe("Bedrock", () => {
 	const bedrock = () => model("bedrock-converse-stream", { baseUrl: `http://127.0.0.1:${server.port}` });
 	const env = { AWS_BEDROCK_SKIP_AUTH: "1", AWS_BEDROCK_FORCE_HTTP1: "1", AWS_REGION: "us-east-1" };
 
-	test("appended turns use Converse content blocks", async () => {
+	test("a question after a user message stays in that message, so roles still alternate", async () => {
 		const h = harness(bedrock(), "server", { env });
 		const main = await h.main();
 		expect(main.body.messages).toBeArray();
@@ -233,10 +233,16 @@ describe("Bedrock", () => {
 		const { messages: mainMessages, ...mainRest } = main.body;
 		const { messages: sideMessages, ...sideRest } = side.body;
 		expect(sideRest).toEqual(mainRest);
-		expect(sideMessages.slice(0, mainMessages.length)).toEqual(mainMessages);
-		expect(sideMessages.slice(mainMessages.length)).toEqual([
-			{ role: "user", content: [{ text: wrapQuestion(QUESTION) }] },
-		]);
+		expect(sideMessages).toHaveLength(mainMessages.length);
+		expect(sideMessages.slice(0, -1)).toEqual(mainMessages.slice(0, -1));
+		const mainLast = mainMessages.at(-1);
+		const sideLast = sideMessages.at(-1);
+		expect(sideLast.role).toBe("user");
+		expect(sideLast.content.slice(0, mainLast.content.length)).toEqual(mainLast.content);
+		expect(sideLast.content.at(-1)).toEqual({ text: wrapQuestion(QUESTION) });
+		for (let i = 1; i < sideMessages.length; i++) {
+			expect(sideMessages[i].role).not.toBe(sideMessages[i - 1].role);
+		}
 	});
 });
 
@@ -281,5 +287,90 @@ describe("request options from the main loop's wrapper", () => {
 		const h = harness(model("openai-codex-responses"), "fetch", { apiKey: token });
 		await h.side({ transport: "auto" });
 		expect(h.sideOptions.at(-1)?.transport).toBe("sse");
+	});
+});
+
+describe("GitHub Copilot", () => {
+	const usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+
+	function afterTools(api: string): Context {
+		return {
+			messages: [
+				{ role: "system", content: "Answer questions about this project.", timestamp: 0 },
+				{ role: "user", content: "Read the parser.", timestamp: 0 },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "parser.ts" } }],
+					api,
+					provider: "github-copilot",
+					model: "test-model",
+					usage,
+					stopReason: "toolUse",
+					timestamp: 0,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "read",
+					content: [{ type: "text", text: "export function parse() {}" }],
+					isError: false,
+					timestamp: 0,
+				},
+			],
+		};
+	}
+
+	/** The header is chosen from the context before `onPayload` replaces the body. */
+	test("X-Initiator stays agent when the main request ended on a tool result", async () => {
+		for (const api of ["anthropic-messages", "openai-completions", "openai-responses"] as const) {
+			resetSnapshot();
+			const m = model(api, { provider: "github-copilot" });
+			const captured: Headers[] = [];
+			const fetch = Object.assign(
+				async (_url: string | URL | Request, init?: RequestInit) => {
+					captured.push(new Headers(init?.headers));
+					throw new Error("offline test: request captured");
+				},
+				{ preconnect() {} },
+			);
+			const context = afterTools(api);
+			await streamSimple(m, context, {
+				apiKey: "offline-test-key",
+				maxRetries: 0,
+				sessionId,
+				fetch,
+				onPayload: (payload) => {
+					recordSnapshot({ sessionId, provider: m.provider, modelId: m.id, api: m.api, payload });
+					return undefined;
+				},
+			}).result();
+			await runSideQuestion({
+				ctx: {
+					model: m,
+					thinkingLevel: "off",
+					modelRegistry: {
+						streamSimple: (target: Model<any>, c: Context, options?: SimpleStreamOptions) =>
+							streamSimple(target, c, { ...options, apiKey: "offline-test-key", maxRetries: 0, fetch }),
+					},
+					sessionManager: { buildSessionProjection: () => ({ messages: context.messages }) },
+				} as unknown as ExtensionCommandContext,
+				pi: { getThinkingLevel: () => "off", getSettings: () => ({}) } as unknown as ExtensionAPI,
+				sessionId,
+				question: QUESTION,
+				history: [],
+				signal: new AbortController().signal,
+				onText() {},
+			});
+			expect(captured).toHaveLength(2);
+			expect(captured[0]!.get("x-initiator")).toBe("agent");
+			expect(captured[1]!.get("x-initiator")).toBe("agent");
+		}
 	});
 });

@@ -36,7 +36,7 @@ import {
 	replayAssistant,
 	wrapQuestion,
 } from "./prompt.js";
-import { getSnapshot, markOwnPayload, type Snapshot } from "./snapshot.js";
+import { getSnapshot, markOwnPayload } from "./snapshot.js";
 
 export interface SideResult {
 	/** The answer as it should be shown, including any appended notice. */
@@ -256,19 +256,42 @@ export function isBedrockBody(payload: unknown): payload is BedrockBody {
 }
 
 /**
- * Append Converse messages.
+ * Append Converse messages without leaving two user turns in a row.
  *
- * The cache point the adapter put on the last prefix message stays where it is,
- * and nothing appended carries one, for the same reason as `appendSideTurns`.
+ * A request the main loop sends ends on a user turn: the prompt, or tool
+ * results, which the adapter has already folded into a user message. Converse
+ * rejects the next message when it is also user. The question text is therefore
+ * added as another content block on that message, after the blocks already
+ * there, including the cache point. The checkpoint stays where the adapter put
+ * it, and the new text sits past it, which is the same arrangement Converse uses
+ * to cache a prefix and then ask something about it. Later history then
+ * alternates assistant and user as new messages.
  */
 export function appendBedrockSideTurns(body: BedrockBody, turns: readonly ReplayTurn[], question: string): BedrockBody {
 	const messages = [...body.messages];
+	const pieces: { role: "user" | "assistant"; text: string }[] = [];
 	for (const turn of turns) {
-		messages.push({ role: "user", content: [{ text: turn.question }] });
-		messages.push({ role: "assistant", content: [{ text: turn.answer }] });
+		pieces.push({ role: "user", text: turn.question });
+		pieces.push({ role: "assistant", text: turn.answer });
 	}
-	messages.push({ role: "user", content: [{ text: wrapQuestion(question) }] });
+	pieces.push({ role: "user", text: wrapQuestion(question) });
+
+	const last = messages[messages.length - 1];
+	let start = 0;
+	if (isConverseUserMessage(last) && pieces[0]?.role === "user") {
+		messages[messages.length - 1] = { ...last, content: [...last.content, { text: pieces[0].text }] };
+		start = 1;
+	}
+	for (const piece of pieces.slice(start)) {
+		messages.push({ role: piece.role, content: [{ text: piece.text }] });
+	}
 	return { ...body, messages };
+}
+
+function isConverseUserMessage(message: unknown): message is { role: "user"; content: unknown[] } {
+	if (!message || typeof message !== "object") return false;
+	const record = message as { role?: unknown; content?: unknown };
+	return record.role === "user" && Array.isArray(record.content);
 }
 
 /** A pi-messages body: Pi's own context, sent as it is, with the request options beside it. */
@@ -507,6 +530,9 @@ const PLACEHOLDER_IMAGE =
 /** Image part types in the bodies Pi sends: Anthropic, Chat Completions, Responses. */
 const IMAGE_PART_TYPES = new Set(["image", "image_url", "input_image"]);
 
+/** Wire shapes of a tool result: Anthropic block, Chat Completions message, Responses item. */
+const TOOL_RESULT_TYPES = new Set(["tool_result", "function_call_output", "custom_tool_call_output"]);
+
 export function bodyHasImages(value: unknown): boolean {
 	if (Array.isArray(value)) return value.some(bodyHasImages);
 	if (!value || typeof value !== "object") return false;
@@ -515,20 +541,67 @@ export function bodyHasImages(value: unknown): boolean {
 	return Object.values(record).some(bodyHasImages);
 }
 
+function isToolResultShape(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.role === "tool" || record.role === "toolResult") return true;
+	if (typeof record.type === "string" && TOOL_RESULT_TYPES.has(record.type)) return true;
+	return "toolResult" in record;
+}
+
+/**
+ * Whether the captured request ends on a tool result.
+ *
+ * Copilot decides `X-Initiator` from the last message of the context it is
+ * handed, before `onPayload` replaces the body. A main request that stopped on
+ * a tool result is `agent`. The wire form of that ending is not always role
+ * `user`: Anthropic puts `tool_result` blocks inside a user message, Chat
+ * Completions uses role `tool`, Responses uses a `function_call_output` item.
+ */
+export function bodyEndsOnToolResult(payload: unknown): boolean {
+	if (!payload || typeof payload !== "object") return false;
+	const body = payload as Record<string, unknown>;
+	const list = Array.isArray(body.input) ? body.input : Array.isArray(body.messages) ? body.messages : undefined;
+	const last = list?.[list.length - 1];
+	if (!last || typeof last !== "object") return false;
+	if (isToolResultShape(last)) return true;
+	const content = (last as { content?: unknown }).content;
+	return Array.isArray(content) && content.some(isToolResultShape);
+}
+
+export interface PlaceholderOptions {
+	/** Copilot refuses an image body that lacks `Copilot-Vision-Request`. */
+	withImage?: boolean;
+	/** Copilot's `X-Initiator` is `agent` when the last message is not a user turn. */
+	agentInitiated?: boolean;
+}
+
 /**
  * A throwaway context for the snapshot path: `onPayload` discards the body
  * built from it.
  *
  * The body goes, but not everything the adapter worked out from this context
  * goes with it. GitHub Copilot's adapters set `Copilot-Vision-Request` from
- * whether the context has an image, before `onPayload` swaps the body, and
- * Copilot turns away a request whose body has images and whose headers do not
- * say so. When the captured body has images, the placeholder carries one too.
+ * whether the context has an image, and `X-Initiator` from the last message's
+ * role, both before `onPayload` swaps the body. The placeholder has to produce
+ * the same two answers the main request's context did.
  */
-export function placeholderContext(question: string, withImage = false): Context {
+export function placeholderContext(question: string, options: PlaceholderOptions = {}): Context {
+	const timestamp = Date.now();
 	const content: (TextContent | ImageContent)[] = [{ type: "text", text: question }];
-	if (withImage) content.push({ type: "image", data: PLACEHOLDER_IMAGE, mimeType: "image/png" });
-	return { messages: [{ role: "user", content, timestamp: Date.now() }] };
+	if (options.withImage) content.push({ type: "image", data: PLACEHOLDER_IMAGE, mimeType: "image/png" });
+	const messages: Message[] = [{ role: "user", content, timestamp }];
+	if (options.agentInitiated) {
+		messages.push({
+			role: "toolResult",
+			toolCallId: "btw",
+			toolName: "btw",
+			content: [{ type: "text", text: " " }],
+			isError: false,
+			timestamp,
+		});
+	}
+	return { messages };
 }
 
 /**
@@ -591,13 +664,20 @@ export async function runSideQuestion(options: SideRequestOptions): Promise<Side
 
 	try {
 		const turns = historyTurns(history);
-		const snapshot: Snapshot | undefined = getSnapshot(sessionId, model);
+		const snapshot = getSnapshot(sessionId, model);
+		const payload = snapshot && extendCapturedBody(snapshot.api, snapshot.payload, turns, question, model, signal);
 
 		let context: Context;
-		const payload = snapshot && extendCapturedBody(snapshot.api, snapshot.payload, turns, question, model, signal);
-		if (payload !== undefined) {
+		if (snapshot && payload !== undefined) {
 			markOwnPayload(payload);
-			context = placeholderContext(question, model.provider === "github-copilot" && bodyHasImages(payload));
+			// Read the captured body, not `payload`: appending the question makes the
+			// last turn a user message, which would hide a tool result the main
+			// request ended on.
+			const copilot = model.provider === "github-copilot";
+			context = placeholderContext(question, {
+				withImage: copilot && bodyHasImages(snapshot.payload),
+				agentInitiated: copilot && bodyEndsOnToolResult(snapshot.payload),
+			});
 		} else {
 			context = rebuildContext(ctx, pi, turns, question, model);
 		}
