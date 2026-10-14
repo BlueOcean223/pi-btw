@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { bodyHeight, createPanel, HISTORY_WINDOW, HOST_ROWS, historyWindow, type PanelItem } from "./panel.js";
+import { bodyHeight, createPanel, HISTORY_WINDOW, HOST_ROWS, historyWindow, type PanelItem } from "./panel.ts";
 
 describe("historyWindow", () => {
 	/** Cursor on the live question, i.e. past every earlier one. */

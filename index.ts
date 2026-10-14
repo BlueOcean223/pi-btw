@@ -31,10 +31,10 @@ import {
 	type Inflight,
 	notifyInflight,
 	setInflight,
-} from "./history.js";
-import { createPanel, type PanelExit, type PanelItem } from "./panel.js";
-import { runSideQuestion, shouldRemember, type SideResult } from "./request.js";
-import { notePendingHeaders, recordSnapshot } from "./snapshot.js";
+} from "./history.ts";
+import { createPanel, type PanelExit, type PanelItem } from "./panel.ts";
+import { runSideQuestion, shouldRemember, type SideResult } from "./request.ts";
+import { notePendingHeaders, recordSnapshot } from "./snapshot.ts";
 
 const USAGE = "用法：/btw <问题>";
 const TUI_ONLY = "/btw 只在交互界面可用，这次没有发出请求";

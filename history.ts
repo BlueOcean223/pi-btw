@@ -11,7 +11,7 @@
  * inside one process finds the list intact.
  */
 
-import type { SideResult } from "./request.js";
+import type { SideResult } from "./request.ts";
 
 /** One answered side question, as it will be replayed into the next request. */
 export interface Exchange {

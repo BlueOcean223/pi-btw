@@ -18,7 +18,7 @@ import {
 	replayResponse,
 	SIDE_QUESTION_REMINDER,
 	wrapQuestion,
-} from "./prompt.js";
+} from "./prompt.ts";
 
 describe("FABRICATED_TOOL_CALL", () => {
 	const NS = "antml:";

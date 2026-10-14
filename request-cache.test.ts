@@ -3,9 +3,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { wrapQuestion } from "./prompt.js";
-import { appendResponsesSideTurns, isResponsesBody, runSideQuestion, type ResponsesBody } from "./request.js";
-import { recordSnapshot, resetSnapshot } from "./snapshot.js";
+import { wrapQuestion } from "./prompt.ts";
+import { appendResponsesSideTurns, isResponsesBody, runSideQuestion, type ResponsesBody } from "./request.ts";
+import { recordSnapshot, resetSnapshot } from "./snapshot.ts";
 
 const sessionId = "btw-cache-regression";
 const model: Model<"openai-responses"> = {

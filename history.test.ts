@@ -17,8 +17,8 @@ import {
 	notifyInflight,
 	resetAllHistory,
 	setInflight,
-} from "./history.js";
-import type { SideResult } from "./request.js";
+} from "./history.ts";
+import type { SideResult } from "./request.ts";
 
 function exchange(question: string) {
 	return { question, response: `answer to ${question}`, createdAt: 0 };

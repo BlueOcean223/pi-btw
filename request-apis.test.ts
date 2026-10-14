@@ -11,9 +11,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import type { Context, Model, ModelsSimpleStreamOptions, ProviderHeaders, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { wrapQuestion } from "./prompt.js";
-import { runSideQuestion } from "./request.js";
-import { notePendingHeaders, recordSnapshot, resetSnapshot } from "./snapshot.js";
+import { wrapQuestion } from "./prompt.ts";
+import { runSideQuestion } from "./request.ts";
+import { notePendingHeaders, recordSnapshot, resetSnapshot } from "./snapshot.ts";
 
 const sessionId = "btw-apis";
 const QUESTION = "What does that mean?";

@@ -28,15 +28,15 @@ import type {
 	TextContent,
 	Tool,
 } from "@earendil-works/pi-ai";
-import type { Exchange } from "./history.js";
+import type { Exchange } from "./history.ts";
 import {
 	CUT_OFF_TAIL,
 	FABRICATED_TOOL_CALL,
 	NO_TOOLS_NOTICE,
 	replayAssistant,
 	wrapQuestion,
-} from "./prompt.js";
-import { getSnapshot, markOwnPayload } from "./snapshot.js";
+} from "./prompt.ts";
+import { getSnapshot, markOwnPayload } from "./snapshot.ts";
 
 export interface SideResult {
 	/** The answer as it should be shown, including any appended notice. */

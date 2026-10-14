@@ -10,8 +10,8 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, Message, Model, Usage } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import type { Exchange } from "./history.js";
-import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER, wrapQuestion } from "./prompt.js";
+import type { Exchange } from "./history.ts";
+import { CUT_OFF_TAIL, NO_TOOLS_NOTICE, OMIT_FABRICATED, SIDE_QUESTION_REMINDER, wrapQuestion } from "./prompt.ts";
 import {
 	appendBedrockSideTurns,
 	appendGoogleSideTurns,
@@ -31,7 +31,7 @@ import {
 	shouldRemember,
 	sideTransport,
 	trimTrailingIncompleteTurn,
-} from "./request.js";
+} from "./request.ts";
 
 const NO_USAGE: Usage = {
 	input: 0,

@@ -16,7 +16,7 @@ import {
 	notePendingHeaders,
 	recordSnapshot,
 	resetSnapshot,
-} from "./snapshot.js";
+} from "./snapshot.ts";
 
 const model = { provider: "anthropic", id: "claude-sonnet-5", api: "anthropic-messages" } as Model<any>;
 
