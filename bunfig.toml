@@ -1,0 +1,5 @@
+[install]
+# pi supplies the peerDependencies: it maps this extension's imports of them
+# onto its own copies. Tests resolve them from the installed pi through a
+# node_modules in a parent directory; a copy installed here would shadow it.
+peer = false

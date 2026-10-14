@@ -77,11 +77,12 @@ pi --extension ./index.ts
 ## 开发
 
 ```bash
-bun test ./*.test.ts   # 单测及本地 HTTP 请求捕获，不调用模型服务
-bun x tsc --noEmit
+bun install
+bun run test        # 单测及本地 HTTP 请求捕获，不调用模型服务
+bun run typecheck
 ```
 
-`node_modules/@earendil-works/*` 符号链接到本机装的 Pi，所以类型检查针对的是你实际跑的那个版本。
+测试和类型检查会 import pi 在运行时提供的包（`@earendil-works/*`、`typebox`）。`bun install` 不安装它们（见 `bunfig.toml`），所以它们来自你正在运行的 pi：把它们从 pi 的安装目录链接到本目录或上级目录的 `node_modules/` 下。
 
 ## 许可
 

@@ -21,7 +21,7 @@
 	},
 	"scripts": {
 		"test": "bun test ./*.test.ts",
-		"typecheck": "bun x tsc --noEmit"
+		"typecheck": "tsc --noEmit"
 	},
 	"pi": {
 		"extensions": ["./index.ts"]
@@ -35,6 +35,7 @@
 		"@earendil-works/pi-tui": "*"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.0"
+		"@types/bun": "^1.4.0",
+		"typescript": "^7.0.2"
 	}
 }

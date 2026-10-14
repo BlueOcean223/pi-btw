@@ -1,8 +1,8 @@
 # Design notes and scratch work, kept local.
 .agent/
 
-# Dependencies. `@earendil-works/*` is symlinked to the installed pi, so a
-# checked-in tree here would be one machine's paths.
+# Dependencies. pi supplies `@earendil-works/*` and bunfig.toml skips installing
+# them, so a lockfile would mostly record a peer tree that is never installed.
 node_modules/
 bun.lock
 bun.lockb

@@ -78,11 +78,12 @@ pi --extension ./index.ts
 ## Development
 
 ```bash
-bun test ./*.test.ts   # unit tests and local HTTP capture; no model service calls
-bun x tsc --noEmit
+bun install
+bun run test        # unit tests and local HTTP capture; no model service calls
+bun run typecheck
 ```
 
-`node_modules/@earendil-works/*` is symlinked to the installed Pi, so the types check against the version you actually run.
+The tests and the type check import the packages pi supplies at runtime (`@earendil-works/*`, `typebox`). `bun install` leaves them out (`bunfig.toml`), so they come from the pi you run: link them from your pi install into `node_modules/` here or in a parent directory.
 
 ## License
 
